@@ -1,0 +1,100 @@
+# Archaven
+
+Archaven is a Rust crate for writing architecture tests over Rust module paths.
+It scans Rust source files, extracts source-to-target dependencies, checks them
+against user-defined rules, and returns printable violations.
+
+Use Archaven when a Rust project needs automated tests for architectural
+boundaries, dependency direction, modular monolith boundaries, plugin isolation,
+or custom source-to-target dependency policies.
+
+## Primary Documentation
+
+- README.md: human-readable guide with examples and scanner notes.
+- docs.rs/archaven: generated Rust API documentation.
+- tests/rules.rs: executable examples for `Rule`, `Access`, and `Violations`.
+- tests/check.rs: executable example for scanning Rust source files.
+
+## Public API Summary
+
+Use these public types:
+
+- `Archaven`: checker entry point.
+- `Rule`: neutral dependency rule.
+- `Access`: source-to-target dependency shape.
+- `Violations`: collection returned by `check`.
+- `Violation`: one dependency violation.
+- `RuleSet`: trait for custom rules.
+
+Do not invent architecture-specific Archaven types such as `Layers`,
+`Boundary`, `OnionArchitecture`, or `ModuleIsolation`.
+
+## Standard Test Pattern
+
+```rust
+use archaven::{Access, Archaven, Rule};
+
+#[test]
+fn architecture_rules_are_respected() {
+    let violations = Archaven::new()
+        .rule(
+            Rule::between("app::*")
+                .named("short human-readable rule name")
+                .deny_all()
+                .allow(
+                    Access::from("relative::source::**")
+                        .to("relative::target::**")
+                        .because("explain the allowed dependency shape"),
+                ),
+        )
+        .check("./src")
+        .unwrap();
+
+    assert!(violations.is_empty(), "{violations}");
+}
+```
+
+## Rule Selection
+
+- Use `Rule::between(scope)` for dependencies between different matched scopes.
+- Use `Rule::within(scope)` for dependencies inside the same matched scope.
+- Use `Rule::new().deny(...)` for absolute source-to-target bans.
+- In `between` and `within` rules, `Access::from` and `Access::to` are relative
+  to the matched scope.
+- Use `.named(...)` and `.because(...)` with human-readable text because it is
+  displayed in violation output.
+
+## Path Patterns
+
+Archaven matches Rust module paths by `::` segments:
+
+- `*` matches exactly one segment.
+- `**` matches one or more segments.
+
+Examples:
+
+- `app::*::domain` matches `app::sales::domain`.
+- `app::*::domain` does not match `app::sales::orders::domain`.
+- `app::**::domain` matches `app::sales::orders::domain`.
+- `app::**::domain` does not match `app::domain`.
+
+`**` does not mean zero segments.
+
+## Scanner Notes
+
+Archaven derives module paths from file paths under the directory passed to
+`check`. For example, `src/app/sales/orders/domain/order.rs` becomes
+`app::sales::orders::domain::order`.
+
+The scanner parses Rust files with `syn` and records dependencies from:
+
+- `use crate::...`
+- `crate::...`
+- `self::...`
+- `super::...`
+- local root paths such as `app::...`
+
+Archaven is a source-level checker, not a complete Rust compiler front-end.
+Macro-generated paths, complex re-exports, trait dispatch, and every possible
+aliasing pattern may require explicit paths in code or future scanner
+improvements.
