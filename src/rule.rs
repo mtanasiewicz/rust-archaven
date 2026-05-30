@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 use crate::{
     ArchavenError, Dependency, DependencyGraph, ModulePath, PathPattern, Violation, Violations,
 };
@@ -114,6 +118,7 @@ pub struct Rule {
     deny_all: bool,
     allows: Vec<Access>,
     denies: Vec<Access>,
+    ignored_files: Vec<String>,
     reason: Option<String>,
 }
 
@@ -127,6 +132,7 @@ impl Rule {
             deny_all: false,
             allows: Vec::new(),
             denies: Vec::new(),
+            ignored_files: Vec::new(),
             reason: None,
         }
     }
@@ -177,6 +183,18 @@ impl Rule {
         self
     }
 
+    /// Ignores dependencies discovered in source files matching the given glob patterns.
+    #[must_use]
+    pub fn ignore_files<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.ignored_files
+            .extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
     /// Adds a default reason used when no more specific reason is available.
     #[must_use]
     pub fn because(mut self, reason: impl Into<String>) -> Self {
@@ -210,6 +228,7 @@ impl Rule {
             .iter()
             .map(|access| access.compile(&self.name))
             .collect::<Result<Vec<_>, _>>()?;
+        let ignored_files = compile_ignored_files(&self.ignored_files)?;
 
         Ok(CompiledRule {
             name: self.name.clone(),
@@ -217,6 +236,7 @@ impl Rule {
             deny_all: self.deny_all,
             allows,
             denies,
+            ignored_files,
             reason: self.reason.clone(),
         })
     }
@@ -234,13 +254,13 @@ impl RuleSet for Rule {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct CompiledRule {
     name: String,
     scope: CompiledScope,
     deny_all: bool,
     allows: Vec<CompiledAccess>,
     denies: Vec<CompiledAccess>,
+    ignored_files: GlobSet,
     reason: Option<String>,
 }
 
@@ -249,6 +269,10 @@ impl CompiledRule {
         let mut violations = Violations::new();
 
         for dependency in graph.dependencies() {
+            if self.ignores_file(dependency.location().file()) {
+                continue;
+            }
+
             if let Some(context) = self.context(dependency) {
                 if let Some(deny) = self
                     .denies
@@ -279,6 +303,21 @@ impl CompiledRule {
         }
 
         violations
+    }
+
+    fn ignores_file(&self, file: &Path) -> bool {
+        let normalized = file.to_string_lossy().replace('\\', "/");
+
+        if self.ignored_files.is_match(normalized.as_str()) {
+            return true;
+        }
+
+        let trimmed = normalized.trim_start_matches('/');
+        let segments = trimmed.split('/').collect::<Vec<_>>();
+        (1..segments.len()).any(|start| {
+            let suffix = segments[start..].join("/");
+            self.ignored_files.is_match(suffix.as_str())
+        })
     }
 
     fn context(&self, dependency: &Dependency) -> Option<EvalContext> {
@@ -341,4 +380,18 @@ impl CompiledRule {
 struct EvalContext {
     source: ModulePath,
     target: ModulePath,
+}
+
+fn compile_ignored_files(patterns: &[String]) -> Result<GlobSet, ArchavenError> {
+    let mut builder = GlobSetBuilder::new();
+
+    for pattern in patterns {
+        let glob = Glob::new(pattern)
+            .map_err(|source| ArchavenError::invalid_pattern(pattern, source.to_string()))?;
+        builder.add(glob);
+    }
+
+    builder
+        .build()
+        .map_err(|source| ArchavenError::invalid_pattern(patterns.join(", "), source.to_string()))
 }

@@ -1,29 +1,33 @@
 use archaven::{Access, Dependency, DependencyGraph, Location, ModulePath, Rule};
 
-fn dep(source: &str, target: &str) -> Dependency {
+fn dep(source: &str, target: &str, file: &str) -> Dependency {
     Dependency::new(
         ModulePath::parse(source).unwrap(),
         ModulePath::parse(target).unwrap(),
-        Location::new("src/example.rs"),
+        Location::new(file),
     )
+}
+
+fn dep_in_example(source: &str, target: &str) -> Dependency {
+    dep(source, target, "src/example.rs")
 }
 
 #[test]
 fn between_rule_allows_only_configured_cross_scope_access() {
     let graph = DependencyGraph::from_dependencies([
-        dep(
+        dep_in_example(
             "app::sales::orders::infrastructure::adapter::billing_client",
             "app::billing::invoices::application::command::issue_invoice",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::domain::order",
             "app::billing::invoices::application::command::issue_invoice",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::infrastructure::adapter::billing_client",
             "app::billing::invoices::domain::invoice",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::application::command::create_order",
             "app::sales::orders::domain::order",
         ),
@@ -52,19 +56,19 @@ fn between_rule_allows_only_configured_cross_scope_access() {
 #[test]
 fn within_rule_checks_dependencies_inside_the_same_scope() {
     let graph = DependencyGraph::from_dependencies([
-        dep(
+        dep_in_example(
             "app::sales::orders::application::command::create_order",
             "app::sales::orders::domain::order",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::application::command::create_order",
             "app::sales::orders::infrastructure::repository::sql_order_repository",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::ui::http_controller",
             "app::sales::orders::application::command::create_order",
         ),
-        dep(
+        dep_in_example(
             "app::billing::invoices::application::command::issue_invoice",
             "app::sales::orders::domain::order",
         ),
@@ -86,13 +90,74 @@ fn within_rule_checks_dependencies_inside_the_same_scope() {
 }
 
 #[test]
-fn global_rule_can_deny_absolute_dependency_patterns() {
+fn rule_can_ignore_dependencies_from_matching_files() {
     let graph = DependencyGraph::from_dependencies([
         dep(
+            "app::sales::orders",
+            "app::sales::orders::infrastructure::repository::sql_order_repository",
+            "src/app/sales/orders/mod.rs",
+        ),
+        dep(
+            "app::sales::orders::application::command::create_order",
+            "app::sales::orders::infrastructure::repository::sql_order_repository",
+            "src/app/sales/orders/application/command/create_order.rs",
+        ),
+    ]);
+
+    let violations = Rule::within("app::*::*")
+        .named("module internals")
+        .deny_all()
+        .ignore_files(["**/mod.rs"])
+        .allow(Access::from("application::**").to("domain::**"))
+        .check(&graph)
+        .unwrap();
+
+    assert_eq!(violations.len(), 1);
+    assert!(violations
+        .to_string()
+        .contains("application/command/create_order.rs"));
+    assert!(!violations.to_string().contains("mod.rs"));
+}
+
+#[test]
+fn ignored_file_patterns_are_rule_specific() {
+    let graph = DependencyGraph::from_dependencies([dep(
+        "app::sales::orders",
+        "app::sales::orders::infrastructure::repository::sql_order_repository",
+        "src/app/sales/orders/mod.rs",
+    )]);
+
+    let violations = Rule::within("app::*::*")
+        .named("module internals")
+        .deny_all()
+        .check(&graph)
+        .unwrap();
+
+    assert_eq!(violations.len(), 1);
+    assert!(violations.to_string().contains("mod.rs"));
+}
+
+#[test]
+fn invalid_ignored_file_globs_are_returned_as_errors() {
+    let graph = DependencyGraph::new();
+
+    let error = Rule::within("app::*::*")
+        .ignore_files(["["])
+        .check(&graph)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("invalid pattern"));
+    assert!(error.to_string().contains('['));
+}
+
+#[test]
+fn global_rule_can_deny_absolute_dependency_patterns() {
+    let graph = DependencyGraph::from_dependencies([
+        dep_in_example(
             "app::sales::orders::domain::order",
             "app::sales::orders::infrastructure::repository::sql_order_repository",
         ),
-        dep(
+        dep_in_example(
             "app::sales::orders::application::command::create_order",
             "app::sales::orders::domain::order",
         ),

@@ -147,6 +147,20 @@ Rule::within("app::*::*")
     .allow(Access::from("ui::**").to("application::**"))
 ```
 
+If a file assembles a module and should not be evaluated by that rule, ignore it
+with a file glob:
+
+```rust
+Rule::within("app::*::*")
+    .named("module internals")
+    .deny_all()
+    .ignore_files(["**/mod.rs"])
+    .allow(Access::from("application::**").to("domain::**"))
+```
+
+`ignore_files` is per-rule. Dependencies discovered in matching source files are
+skipped for that rule before `deny`, `deny_all`, and `allow` are evaluated.
+
 This can model layered, hexagonal, vertical-slice, plugin, or custom dependency
 styles without adding architecture-specific types to the public API.
 
@@ -263,6 +277,13 @@ fn module_internal_dependencies_are_valid() {
 assert!(violations.is_empty(), "{violations}");
 ```
 
+For test assertions, `assert_empty` panics with the formatted violation list and
+reports the panic at the assertion call site:
+
+```rust
+violations.assert_empty();
+```
+
 You can also format violations yourself:
 
 ```rust
@@ -309,6 +330,9 @@ The scanner parses Rust files with `syn` and records dependencies from:
 - `self::...`
 - `super::...`
 - local root paths such as `app::...`
+
+Use `Rule::ignore_files(["**/mod.rs"])` when module composition root files
+intentionally wire internals that the rule should not evaluate.
 
 This keeps Archaven fast and usable from regular tests. It also means the first
 version is a source-level checker, not a full Rust compiler front-end. Macro

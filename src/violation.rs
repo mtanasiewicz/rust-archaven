@@ -104,6 +104,7 @@ impl Violations {
     /// # Panics
     ///
     /// Panics with the formatted violation list when the collection is not empty.
+    #[track_caller]
     pub fn assert_empty(&self) {
         assert!(self.is_empty(), "{self}");
     }
