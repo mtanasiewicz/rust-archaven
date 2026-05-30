@@ -3,7 +3,8 @@ use std::path::Path;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::{
-    ArchavenError, Dependency, DependencyGraph, ModulePath, PathPattern, Violation, Violations,
+    ArchavenError, Dependency, DependencyGraph, Location, ModulePath, PathPattern, Violation,
+    Violations,
 };
 
 /// A custom dependency rule set.
@@ -101,6 +102,7 @@ enum Scope {
     Global,
     Between(String),
     Within(String),
+    Directories(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,6 +110,7 @@ enum CompiledScope {
     Global,
     Between(PathPattern),
     Within(PathPattern),
+    Directories(DirectoryPattern),
 }
 
 /// Neutral dependency rule.
@@ -119,6 +122,8 @@ pub struct Rule {
     allows: Vec<Access>,
     denies: Vec<Access>,
     ignored_files: Vec<String>,
+    ignore_module_roots: bool,
+    allow_only_module_roots: bool,
     reason: Option<String>,
 }
 
@@ -133,6 +138,8 @@ impl Rule {
             allows: Vec::new(),
             denies: Vec::new(),
             ignored_files: Vec::new(),
+            ignore_module_roots: false,
+            allow_only_module_roots: false,
             reason: None,
         }
     }
@@ -151,6 +158,16 @@ impl Rule {
     pub fn within(scope: impl Into<String>) -> Self {
         Self {
             scope: Scope::Within(scope.into()),
+            ..Self::new()
+        }
+    }
+
+    /// Creates a rule for source directories matching a module path pattern.
+    #[must_use]
+    pub fn directories(scope: impl Into<String>) -> Self {
+        Self {
+            name: "directory rule".to_owned(),
+            scope: Scope::Directories(scope.into()),
             ..Self::new()
         }
     }
@@ -198,6 +215,26 @@ impl Rule {
         self
     }
 
+    /// Ignores dependencies discovered in Rust module root files.
+    ///
+    /// Module root files are `mod.rs`, `lib.rs`, and files named after a child
+    /// directory such as `orders.rs` for an `orders/` directory.
+    #[must_use]
+    pub fn ignore_module_roots(mut self) -> Self {
+        self.ignore_module_roots = true;
+        self
+    }
+
+    /// Allows only Rust module root files directly inside matching directories.
+    ///
+    /// Matching directories may contain `mod.rs`, `lib.rs`, and files named
+    /// after child directories such as `orders.rs` for an `orders/` directory.
+    #[must_use]
+    pub fn allow_only_module_roots(mut self) -> Self {
+        self.allow_only_module_roots = true;
+        self
+    }
+
     /// Adds a default reason used when no more specific reason is available.
     #[must_use]
     pub fn because(mut self, reason: impl Into<String>) -> Self {
@@ -219,7 +256,24 @@ impl Rule {
             Scope::Global => CompiledScope::Global,
             Scope::Between(pattern) => CompiledScope::Between(PathPattern::parse(pattern)?),
             Scope::Within(pattern) => CompiledScope::Within(PathPattern::parse(pattern)?),
+            Scope::Directories(pattern) => {
+                CompiledScope::Directories(DirectoryPattern::parse(&self.name, pattern)?)
+            }
         };
+
+        if matches!(self.scope, Scope::Directories(_)) && !self.allow_only_module_roots {
+            return Err(ArchavenError::invalid_rule(
+                &self.name,
+                "directory rule must define a directory policy",
+            ));
+        }
+
+        if !matches!(self.scope, Scope::Directories(_)) && self.allow_only_module_roots {
+            return Err(ArchavenError::invalid_rule(
+                &self.name,
+                "`allow_only_module_roots` can only be used with `Rule::directories`",
+            ));
+        }
 
         let allows = self
             .allows
@@ -240,6 +294,8 @@ impl Rule {
             allows,
             denies,
             ignored_files,
+            ignore_module_roots: self.ignore_module_roots,
+            allow_only_module_roots: self.allow_only_module_roots,
             reason: self.reason.clone(),
         })
     }
@@ -264,15 +320,21 @@ struct CompiledRule {
     allows: Vec<CompiledAccess>,
     denies: Vec<CompiledAccess>,
     ignored_files: GlobSet,
+    ignore_module_roots: bool,
+    allow_only_module_roots: bool,
     reason: Option<String>,
 }
 
 impl CompiledRule {
     fn check(&self, graph: &DependencyGraph) -> Violations {
+        if matches!(self.scope, CompiledScope::Directories(_)) {
+            return self.check_directories(graph);
+        }
+
         let mut violations = Violations::new();
 
         for dependency in graph.dependencies() {
-            if self.ignores_file(dependency.location().file()) {
+            if self.ignores_dependency_file(graph, dependency.location().file()) {
                 continue;
             }
 
@@ -306,6 +368,45 @@ impl CompiledRule {
         }
 
         violations
+    }
+
+    fn check_directories(&self, graph: &DependencyGraph) -> Violations {
+        let mut violations = Violations::new();
+        let CompiledScope::Directories(pattern) = &self.scope else {
+            return violations;
+        };
+
+        if !self.allow_only_module_roots {
+            return violations;
+        }
+
+        for directory in graph
+            .directories()
+            .iter()
+            .filter(|directory| pattern.matches(directory.module()))
+        {
+            for file in directory.files() {
+                if is_module_root_file(file, directory.child_directories()) {
+                    continue;
+                }
+
+                let module = module_for_directory_file(directory.module(), file);
+                violations.push(Violation::for_file(
+                    &self.name,
+                    self.reason.clone().unwrap_or_else(|| {
+                        "only module root files are allowed in this directory".to_owned()
+                    }),
+                    module,
+                    Location::new(directory.path().join(file)),
+                ));
+            }
+        }
+
+        violations
+    }
+
+    fn ignores_dependency_file(&self, graph: &DependencyGraph, file: &Path) -> bool {
+        self.ignores_file(file) || (self.ignore_module_roots && is_module_root_path(graph, file))
     }
 
     fn ignores_file(&self, file: &Path) -> bool {
@@ -347,6 +448,7 @@ impl CompiledRule {
                     target: target.remainder().clone(),
                 })
             }
+            CompiledScope::Directories(_) => None,
         }
     }
 
@@ -380,6 +482,47 @@ impl CompiledRule {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct DirectoryPattern {
+    pattern: PathPattern,
+}
+
+impl DirectoryPattern {
+    fn parse(rule_name: &str, pattern: &str) -> Result<Self, ArchavenError> {
+        if pattern
+            .split("::")
+            .map(str::trim)
+            .any(|segment| segment == "**")
+        {
+            return Err(ArchavenError::invalid_rule(
+                rule_name,
+                "directory rules do not support `**`",
+            ));
+        }
+
+        let star_count = pattern
+            .split("::")
+            .map(str::trim)
+            .filter(|segment| *segment == "*")
+            .count();
+
+        if star_count == 0 {
+            return Err(ArchavenError::invalid_rule(
+                rule_name,
+                "directory rules support at least one `*` segment",
+            ));
+        }
+
+        Ok(Self {
+            pattern: PathPattern::parse(pattern)?,
+        })
+    }
+
+    fn matches(&self, path: &ModulePath) -> bool {
+        self.pattern.matches(path)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct EvalContext {
     source: ModulePath,
     target: ModulePath,
@@ -397,4 +540,37 @@ fn compile_ignored_files(patterns: &[String]) -> Result<GlobSet, ArchavenError> 
     builder
         .build()
         .map_err(|source| ArchavenError::invalid_pattern(patterns.join(", "), source.to_string()))
+}
+
+fn is_module_root_path(graph: &DependencyGraph, file: &Path) -> bool {
+    graph.directories().iter().any(|directory| {
+        file.parent()
+            .is_some_and(|parent| parent == directory.path())
+            && file.file_name().is_some_and(|name| {
+                is_module_root_file(&name.to_string_lossy(), directory.child_directories())
+            })
+    })
+}
+
+fn is_module_root_file(
+    file_name: &str,
+    child_directories: &std::collections::BTreeSet<String>,
+) -> bool {
+    matches!(file_name, "mod.rs" | "lib.rs")
+        || file_name
+            .strip_suffix(".rs")
+            .is_some_and(|stem| child_directories.contains(stem))
+}
+
+fn module_for_directory_file(directory: &ModulePath, file_name: &str) -> ModulePath {
+    let Some(stem) = file_name.strip_suffix(".rs") else {
+        return directory.clone();
+    };
+
+    let mut segments = directory.segments().to_vec();
+    match stem {
+        "mod" | "lib" => {}
+        other => segments.push(other.to_owned()),
+    }
+    ModulePath::from_segments(segments)
 }

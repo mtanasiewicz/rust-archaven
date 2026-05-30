@@ -27,6 +27,10 @@ Use these public types:
 - `Violations`: collection returned by `check`.
 - `Violation`: one dependency violation.
 - `RuleSet`: trait for custom rules.
+- `DependencyGraph`: scanned dependencies and source directories for custom
+  rules.
+- `SourceDirectory`: discovered directory metadata exposed through
+  `DependencyGraph::directories()`.
 
 Do not invent architecture-specific Archaven types such as `Layers`,
 `Boundary`, `OnionArchitecture`, or `ModuleIsolation`.
@@ -59,12 +63,17 @@ fn architecture_rules_are_respected() {
 
 - Use `Rule::between(scope)` for dependencies between different matched scopes.
 - Use `Rule::within(scope)` for dependencies inside the same matched scope.
+- Use `Rule::directories(scope).allow_only_module_roots()` when matching
+  directories should contain only Rust module root files. Directory rules support
+  one or more `*` segments and do not support `**`; the full pattern selects the
+  checked directory level.
 - Use `Rule::new().deny(...)` for absolute source-to-target bans.
 - In `between` and `within` rules, `Access::from` and `Access::to` are relative
   to the matched scope.
-- Use `Rule::ignore_files(["**/mod.rs"])` on a rule when files such as `mod.rs`
-  act as module composition roots and should be skipped by that specific rule.
-  Ignored files are not evaluated by that rule.
+- Use `Rule::ignore_module_roots()` on dependency rules when `mod.rs`, `lib.rs`,
+  and files named after child directories should be skipped by that specific
+  rule. Ignored files are not evaluated by that rule.
+- Use `Rule::ignore_files([...])` for custom file glob ignores.
 - Use `.named(...)` and `.because(...)` with human-readable text because it is
   displayed in violation output.
 

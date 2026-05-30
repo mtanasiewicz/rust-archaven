@@ -11,12 +11,17 @@ use syn::{
 };
 use walkdir::WalkDir;
 
+use crate::graph::SourceDirectory;
 use crate::{ArchavenError, Dependency, DependencyGraph, Location, ModulePath};
 
 pub(crate) fn scan(root: &Path) -> Result<DependencyGraph, ArchavenError> {
     let files = discover_files(root)?;
     let roots = local_roots(&files);
     let mut graph = DependencyGraph::new();
+
+    for directory in discover_directories(root)? {
+        graph.push_directory(directory);
+    }
 
     for source_file in files {
         let content =
@@ -39,6 +44,89 @@ pub(crate) fn scan(root: &Path) -> Result<DependencyGraph, ArchavenError> {
     }
 
     Ok(graph)
+}
+
+fn discover_directories(root: &Path) -> Result<Vec<SourceDirectory>, ArchavenError> {
+    let mut directories = Vec::new();
+
+    for entry in WalkDir::new(root) {
+        let entry = entry.map_err(|source| ArchavenError::WalkDir {
+            path: source
+                .path()
+                .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+            source,
+        })?;
+
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        let files = fs::read_dir(path)
+            .map_err(|source| ArchavenError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .map(|entry| {
+                entry.map_err(|source| ArchavenError::ReadFile {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let rust_files = files
+            .iter()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let is_rust_file = entry
+                    .file_type()
+                    .ok()
+                    .is_some_and(|file_type| file_type.is_file())
+                    && path.extension().is_some_and(|extension| extension == "rs");
+
+                is_rust_file
+                    .then(|| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .flatten()
+            })
+            .collect::<BTreeSet<_>>();
+
+        let child_directories = files
+            .iter()
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .is_some_and(|file_type| file_type.is_dir())
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>();
+
+        directories.push(SourceDirectory::new(
+            path,
+            module_path_for_directory(root, path),
+            rust_files,
+            child_directories,
+        ));
+    }
+
+    directories.sort_by(|left, right| left.path().cmp(right.path()));
+    Ok(directories)
+}
+
+fn module_path_for_directory(root: &Path, directory: &Path) -> ModulePath {
+    let segments = directory
+        .strip_prefix(root)
+        .ok()
+        .into_iter()
+        .flat_map(Path::components)
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    ModulePath::from_segments(segments)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

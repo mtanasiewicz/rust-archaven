@@ -64,7 +64,7 @@ Add Archaven as a dev dependency:
 
 ```toml
 [dev-dependencies]
-archaven = "0.2.1"
+archaven = "1.0.0"
 ```
 
 ## Simple Examples
@@ -104,6 +104,14 @@ Rule::within("app::*")
     .allow(Access::from("infrastructure::**").to("application::**"))
     .allow(Access::from("infrastructure::**").to("domain::**"))
     .because("feature dependencies should point through application and domain code")
+```
+
+Keep selected directories limited to Rust module root files:
+
+```rust
+Rule::directories("app::*")
+    .named("module roots")
+    .allow_only_module_roots()
 ```
 
 These examples are intentionally plain. Archaven does not require you to adopt a
@@ -304,6 +312,97 @@ Rule::within("app::*::*")
 `ignore_files` is per-rule. Dependencies discovered in matching source files are
 skipped for that rule before `deny`, `deny_all`, and `allow` are evaluated.
 
+Use `ignore_module_roots` when both Rust module root styles should be skipped:
+
+```rust
+Rule::within("app::*::*")
+    .named("module internals")
+    .deny_all()
+    .ignore_module_roots()
+    .allow(Access::from("application::**").to("domain::**"))
+```
+
+Module root files are `mod.rs`, `lib.rs`, and files named after a child
+directory, such as `application.rs` when an `application/` directory exists.
+
+### `Rule::directories`
+
+`Rule::directories(pattern)` checks the physical Rust files directly inside
+directories whose module path matches the pattern.
+
+```rust
+Rule::directories("app::*")
+    .named("module roots")
+    .allow_only_module_roots()
+```
+
+Directory rules intentionally support one or more `*` segments and do not
+support `**`. The full pattern chooses the directory level to check, so the last
+`*` is the checked level. For example, `app::*` checks directories such as
+`app::orders` and `app::billing`, while `app::*::*` checks directories such as
+`app::sales::orders`.
+
+`allow_only_module_roots` allows only these `.rs` files in each matching
+directory:
+
+- `mod.rs`
+- `lib.rs`
+- `<child-directory>.rs`
+
+For example, this layout is allowed:
+
+```text
+src/app/orders/
+  mod.rs
+  application.rs
+  domain.rs
+  application/
+    command.rs
+  domain/
+    order.rs
+```
+
+but `src/app/orders/helper.rs` is reported unless an `orders/helper/` directory
+also exists.
+
+### Multiple Rules
+
+Rules are independent and can be combined in one checker:
+
+```rust
+let violations = Archaven::new()
+    .rule(
+        Rule::directories("app::*")
+            .named("module roots")
+            .allow_only_module_roots(),
+    )
+    .rule(
+        Rule::between("app::*")
+            .named("bounded contexts")
+            .deny_all()
+            .allow(
+                Access::from("*::infrastructure::adapter::**")
+                    .to_any([
+                        "*::application::command::**",
+                        "*::application::query::**",
+                    ]),
+            ),
+    )
+    .rule(
+        Rule::within("app::*::*")
+            .named("module internals")
+            .deny_all()
+            .ignore_module_roots()
+            .allow(Access::from("application::**").to("domain::**"))
+            .allow(Access::from("infrastructure::**").to("application::**"))
+            .allow(Access::from("infrastructure::**").to("domain::**"))
+            .allow(Access::from("ui::**").to("application::**")),
+    )
+    .check("./src")?;
+
+violations.assert_empty();
+```
+
 This can model layered, hexagonal, vertical-slice, plugin, or custom dependency
 styles without adding architecture-specific types to the public API.
 
@@ -448,7 +547,7 @@ A violation contains:
 - rule name
 - reason
 - source module path
-- target module path
+- target module path for dependency violations
 - file path
 - line and column when available
 
@@ -477,18 +576,21 @@ The scanner parses Rust files with `syn` and records dependencies from:
 - `super::...`
 - local root paths such as `app::...`
 
-Use `Rule::ignore_files(["**/mod.rs"])` when module composition root files
-intentionally wire internals that the rule should not evaluate.
+Use `Rule::ignore_module_roots()` when module root files intentionally wire
+internals that the rule should not evaluate. Use
+`Rule::directories("app::*").allow_only_module_roots()` when matching
+directories should contain only Rust module root files.
 
-This keeps Archaven fast and usable from regular tests. It also means the first
-version is a source-level checker, not a full Rust compiler front-end. Macro
+This keeps Archaven fast and usable from regular tests. It also means Archaven
+is a source-level checker, not a full Rust compiler front-end. Macro
 generated paths, complex re-exports, trait dispatch, and every possible aliasing
 pattern may require explicit paths in code or future scanner improvements.
 
 ## Custom Rule Sets
 
 The built-in `Rule` type is enough for many projects, but Archaven also exposes
-`RuleSet` for custom policies.
+`RuleSet` for custom policies. Custom rules can inspect discovered dependencies
+and source directories through `DependencyGraph`.
 
 ```rust
 use archaven::{ArchavenError, DependencyGraph, RuleSet, Violations};
@@ -497,7 +599,19 @@ struct MyRule;
 
 impl RuleSet for MyRule {
     fn check(&self, graph: &DependencyGraph) -> Result<Violations, ArchavenError> {
-        let _ = graph;
+        for dependency in graph.dependencies() {
+            let _ = (dependency.source(), dependency.target());
+        }
+
+        for directory in graph.directories() {
+            let _ = (
+                directory.path(),
+                directory.module(),
+                directory.files(),
+                directory.child_directories(),
+            );
+        }
+
         Ok(Violations::new())
     }
 }

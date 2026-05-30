@@ -23,6 +23,21 @@ impl Violation {
         }
     }
 
+    pub(crate) fn for_file(
+        rule_name: &str,
+        reason: String,
+        module: ModulePath,
+        location: Location,
+    ) -> Self {
+        Self {
+            rule_name: rule_name.to_owned(),
+            reason,
+            source: module,
+            target: ModulePath::from_segments(Vec::new()),
+            location,
+        }
+    }
+
     /// Returns the rule name.
     #[must_use]
     pub fn rule_name(&self) -> &str {
@@ -152,8 +167,12 @@ impl fmt::Display for Violations {
             }
             writeln!(formatter)?;
             writeln!(formatter)?;
-            writeln!(formatter, "{} depends on", violation.source)?;
-            writeln!(formatter, "{}", violation.target)?;
+            if violation.target.is_empty() {
+                writeln!(formatter, "{} violates this rule", violation.source)?;
+            } else {
+                writeln!(formatter, "{} depends on", violation.source)?;
+                writeln!(formatter, "{}", violation.target)?;
+            }
             writeln!(formatter)?;
             writeln!(formatter, "{}", violation.reason)?;
         }

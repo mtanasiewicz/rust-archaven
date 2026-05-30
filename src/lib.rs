@@ -29,7 +29,7 @@ mod scanner;
 mod violation;
 
 pub use crate::error::ArchavenError;
-pub use crate::graph::{Dependency, DependencyGraph, Location};
+pub use crate::graph::{Dependency, DependencyGraph, Location, SourceDirectory};
 pub use crate::path::{ModulePath, PathPattern, PrefixMatch};
 pub use crate::rule::{Access, Rule, RuleSet};
 pub use crate::violation::{Violation, Violations};

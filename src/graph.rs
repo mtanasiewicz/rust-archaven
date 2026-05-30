@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use crate::ModulePath;
 
@@ -94,6 +97,7 @@ impl Dependency {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyGraph {
     dependencies: Vec<Dependency>,
+    directories: Vec<SourceDirectory>,
 }
 
 impl DependencyGraph {
@@ -110,6 +114,7 @@ impl DependencyGraph {
     {
         Self {
             dependencies: dependencies.into_iter().collect(),
+            directories: Vec::new(),
         }
     }
 
@@ -122,5 +127,64 @@ impl DependencyGraph {
     #[must_use]
     pub fn dependencies(&self) -> &[Dependency] {
         &self.dependencies
+    }
+
+    pub(crate) fn push_directory(&mut self, directory: SourceDirectory) {
+        self.directories.push(directory);
+    }
+
+    /// Returns discovered source directories in discovery order.
+    #[must_use]
+    pub fn directories(&self) -> &[SourceDirectory] {
+        &self.directories
+    }
+}
+
+/// A Rust source directory discovered while scanning.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceDirectory {
+    path: PathBuf,
+    module: ModulePath,
+    files: BTreeSet<String>,
+    child_directories: BTreeSet<String>,
+}
+
+impl SourceDirectory {
+    pub(crate) fn new(
+        path: impl AsRef<Path>,
+        module: ModulePath,
+        files: BTreeSet<String>,
+        child_directories: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            module,
+            files,
+            child_directories,
+        }
+    }
+
+    /// Returns the source directory path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the Rust module path represented by this directory.
+    #[must_use]
+    pub fn module(&self) -> &ModulePath {
+        &self.module
+    }
+
+    /// Returns Rust file names directly inside this directory.
+    #[must_use]
+    pub fn files(&self) -> &BTreeSet<String> {
+        &self.files
+    }
+
+    /// Returns child directory names directly inside this directory.
+    #[must_use]
+    pub fn child_directories(&self) -> &BTreeSet<String> {
+        &self.child_directories
     }
 }
