@@ -1,36 +1,41 @@
 # Archaven
 
-Archaven is a Rust library for checking dependency rules inside Rust projects.
+Put your Rust module dependency rules in tests.
 
-It scans Rust source files, extracts dependencies between module paths, runs your
-rules against those dependencies, and returns a printable list of violations.
-The primary use case is an architecture test that fails when code crosses a
-boundary it should not cross.
+Archaven scans Rust source files, finds dependencies between module paths, checks
+them against your rules, and returns printable violations. Use it when a project
+has boundaries that should stay true over time: domain code should not import
+infrastructure, HTTP handlers should not reach straight into the database, or one
+business module should not depend on another module's internals.
+
+Start with one rule:
 
 ```rust
 use archaven::{Access, Archaven, Rule};
 
 #[test]
-fn architecture_rules_are_respected() {
+fn domain_does_not_depend_on_infrastructure() {
     let violations = Archaven::new()
         .rule(
-            Rule::between("app::*")
-                .named("bounded contexts")
-                .deny_all()
-                .allow(
-                    Access::from("*::infrastructure::adapter::**")
-                        .to_any([
-                            "*::application::command::**",
-                            "*::application::query::**",
-                        ])
-                        .because("bounded contexts communicate through adapters and command/query APIs"),
+            Rule::new()
+                .named("domain purity")
+                .deny(
+                    Access::from("app::**::domain::**")
+                        .to("app::**::infrastructure::**")
+                        .because("domain code must not depend on infrastructure"),
                 ),
         )
         .check("./src")
         .unwrap();
 
-    assert!(violations.is_empty(), "{violations}");
+    violations.assert_empty();
 }
+```
+
+That test fails when Archaven finds a dependency like:
+
+```text
+app::orders::domain::order -> app::orders::infrastructure::database
 ```
 
 ## What Archaven Checks
@@ -61,6 +66,144 @@ Add Archaven as a dev dependency:
 [dev-dependencies]
 archaven = "0.2.1"
 ```
+
+## Simple Examples
+
+Ban one direction globally:
+
+```rust
+Rule::new()
+    .named("domain purity")
+    .deny(
+        Access::from("app::**::domain::**")
+            .to("app::**::infrastructure::**")
+            .because("domain code must not depend on infrastructure"),
+    )
+```
+
+Keep handlers out of persistence details:
+
+```rust
+Rule::new()
+    .named("handlers use application services")
+    .deny(
+        Access::from("app::**::http::**")
+            .to("app::**::database::**")
+            .because("HTTP handlers should go through application services"),
+    )
+```
+
+Allow only a narrow dependency shape inside each feature:
+
+```rust
+Rule::within("app::*")
+    .named("feature internals")
+    .deny_all()
+    .allow(Access::from("http::**").to("application::**"))
+    .allow(Access::from("application::**").to("domain::**"))
+    .allow(Access::from("infrastructure::**").to("application::**"))
+    .allow(Access::from("infrastructure::**").to("domain::**"))
+    .because("feature dependencies should point through application and domain code")
+```
+
+These examples are intentionally plain. Archaven does not require you to adopt a
+specific architecture style; it checks source-to-target module path policies that
+fit your codebase.
+
+## Similar Tools
+
+Archaven follows the same general idea as
+[ArchUnit](https://www.archunit.org/) in the Java ecosystem: architecture rules
+should be executable tests, not comments in a diagram. ArchUnit works over Java
+classes, packages, and bytecode-level concepts. Archaven keeps the same testing
+habit, but applies it to Rust source files and Rust module paths.
+
+It is also close in spirit to [Deptrac](https://deptrac.github.io/deptrac/) in
+the PHP ecosystem. Deptrac groups code into layers and checks which layers may
+depend on which other layers. Archaven does not use a separate YAML layer model;
+rules are written directly in Rust tests with `Rule`, `Access`, and module path
+patterns.
+
+The goal is intentionally small: make dependency boundaries visible in normal
+Rust test suites and CI.
+
+## More Boundary Examples
+
+Keep one feature from reaching into another feature's internals:
+
+```rust
+Rule::between("app::*")
+    .named("feature boundaries")
+    .deny_all()
+    .allow(
+        Access::from("**")
+            .to("api::**")
+            .because("features expose only their public API modules"),
+    )
+```
+
+Keep plugin code from depending on the application shell:
+
+```rust
+Rule::new()
+    .named("plugins stay independent")
+    .deny(
+        Access::from("plugins::**")
+            .to("app::shell::**")
+            .because("plugins should not depend on application shell internals"),
+    )
+```
+
+Keep tests and support code from leaking into production modules:
+
+```rust
+Rule::new()
+    .named("production does not use test support")
+    .deny(
+        Access::from("app::**")
+            .to("test_support::**")
+            .because("test helpers must stay out of production code"),
+    )
+```
+
+Protect a shared kernel from depending on product-specific modules:
+
+```rust
+Rule::new()
+    .named("shared kernel is product-neutral")
+    .deny(
+        Access::from("app::shared::**")
+            .to_any(["app::billing::**", "app::sales::**"])
+            .because("shared code should not depend on product-specific modules"),
+    )
+```
+
+## Example Project
+
+The repository includes a small runnable example in
+[`examples/basic_architecture_test.rs`](examples/basic_architecture_test.rs).
+It scans the sample source tree under `examples/sample_app/src` and demonstrates
+the simple rules from this README.
+
+Run it with:
+
+```bash
+cargo test --example basic_architecture_test
+```
+
+The example is deliberately small. It is meant to show how an architecture test
+looks in a normal Rust project before you move on to larger modular-monolith
+rules.
+
+## Who This Is For
+
+Archaven is most useful once a Rust codebase has boundaries that people can name:
+features, bounded contexts, application/domain/infrastructure folders, plugins,
+adapters, or shared modules. It is a good fit for teams that already review
+module dependencies by convention and want those conventions to run in CI.
+
+It is probably too much for tiny crates with only a few modules. In that case,
+regular Rust visibility, module organization, and code review may be enough.
 
 ## Core Concepts
 
@@ -203,7 +346,10 @@ app::**                does not match app
 Patterns are intentionally segment-based. `app::*::domain` is different from
 `app::**::domain`, and `**` never means "zero segments".
 
-## Modular Monolith Example
+## Larger Modular Monolith Example
+
+The same primitives scale to a modular monolith. Start by describing the module
+paths that matter, then decide which source-to-target dependencies are allowed.
 
 Given this source layout:
 
