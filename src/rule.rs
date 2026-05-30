@@ -188,10 +188,13 @@ impl Rule {
     pub fn ignore_files<I, S>(mut self, patterns: I) -> Self
     where
         I: IntoIterator<Item = S>,
-        S: Into<String>,
+        S: AsRef<str>,
     {
-        self.ignored_files
-            .extend(patterns.into_iter().map(Into::into));
+        self.ignored_files.extend(
+            patterns
+                .into_iter()
+                .map(|pattern| pattern.as_ref().to_owned()),
+        );
         self
     }
 

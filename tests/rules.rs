@@ -1,5 +1,7 @@
 use archaven::{Access, Dependency, DependencyGraph, Location, ModulePath, Rule};
 
+const COMPOSITION_ROOT_GLOBS: &[&str] = &["**/mod.rs"];
+
 fn dep(source: &str, target: &str, file: &str) -> Dependency {
     Dependency::new(
         ModulePath::parse(source).unwrap(),
@@ -107,7 +109,7 @@ fn rule_can_ignore_dependencies_from_matching_files() {
     let violations = Rule::within("app::*::*")
         .named("module internals")
         .deny_all()
-        .ignore_files(["**/mod.rs"])
+        .ignore_files(COMPOSITION_ROOT_GLOBS)
         .allow(Access::from("application::**").to("domain::**"))
         .check(&graph)
         .unwrap();

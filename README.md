@@ -59,7 +59,7 @@ Add Archaven as a dev dependency:
 
 ```toml
 [dev-dependencies]
-archaven = "0.2"
+archaven = "0.2.1"
 ```
 
 ## Core Concepts
