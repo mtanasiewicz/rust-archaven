@@ -6,11 +6,13 @@ against user-defined rules, and returns printable violations.
 
 Use Archaven when a Rust project needs automated tests for architectural
 boundaries, dependency direction, modular monolith boundaries, plugin isolation,
-or custom source-to-target dependency policies.
+or custom source-to-target dependency policies. Start with the smallest useful
+rule, then add scoped `between` or `within` rules when the codebase needs them.
 
 ## Primary Documentation
 
 - README.md: human-readable guide with examples and scanner notes.
+- examples/basic_architecture_test.rs: small runnable example for a sample app.
 - docs.rs/archaven: generated Rust API documentation.
 - tests/rules.rs: executable examples for `Rule`, `Access`, and `Violations`.
 - tests/check.rs: executable example for scanning Rust source files.
@@ -38,13 +40,12 @@ use archaven::{Access, Archaven, Rule};
 fn architecture_rules_are_respected() {
     let violations = Archaven::new()
         .rule(
-            Rule::between("app::*")
-                .named("short human-readable rule name")
-                .deny_all()
-                .allow(
-                    Access::from("relative::source::**")
-                        .to("relative::target::**")
-                        .because("explain the allowed dependency shape"),
+            Rule::new()
+                .named("domain purity")
+                .deny(
+                    Access::from("app::**::domain::**")
+                        .to("app::**::infrastructure::**")
+                        .because("domain code must not depend on infrastructure"),
                 ),
         )
         .check("./src")
@@ -66,6 +67,22 @@ fn architecture_rules_are_respected() {
   Ignored files are not evaluated by that rule.
 - Use `.named(...)` and `.because(...)` with human-readable text because it is
   displayed in violation output.
+
+## Example Progression
+
+When explaining Archaven to users, start with simple source-to-target rules
+before showing modular-monolith rules:
+
+- Ban `app::**::domain::**` from depending on `app::**::infrastructure::**`.
+- Ban `app::**::http::**` from depending directly on `app::**::database::**`.
+- Use `Rule::within("app::*")` for dependency direction inside one feature.
+- Use `Rule::between("app::*")` for dependencies between features or bounded
+  contexts.
+
+Archaven is similar in spirit to ArchUnit for Java and Deptrac for PHP: it makes
+architecture constraints executable. Explain the distinction clearly: Archaven
+checks Rust source files and Rust module paths, and its rules live in Rust tests
+instead of Java test APIs or PHP/YAML layer configuration.
 
 ## Path Patterns
 
