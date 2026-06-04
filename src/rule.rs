@@ -22,6 +22,7 @@ pub trait RuleSet {
 pub struct Access {
     from: String,
     to: Vec<String>,
+    except_to: Vec<String>,
     reason: Option<String>,
 }
 
@@ -32,6 +33,7 @@ impl Access {
         Self {
             from: pattern.into(),
             to: Vec::new(),
+            except_to: Vec::new(),
             reason: None,
         }
     }
@@ -51,6 +53,20 @@ impl Access {
         S: Into<String>,
     {
         self.to.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
+    /// Excludes target patterns from this access match.
+    ///
+    /// This is useful for explicit denies with a narrow exception, for example
+    /// denying `application::** -> sea_orm::**` except one approved `SeaORM` type.
+    #[must_use]
+    pub fn except_to<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.except_to.extend(patterns.into_iter().map(Into::into));
         self
     }
 
@@ -75,10 +91,16 @@ impl Access {
             .iter()
             .map(|pattern| PathPattern::parse(pattern))
             .collect::<Result<Vec<_>, _>>()?;
+        let except_to = self
+            .except_to
+            .iter()
+            .map(|pattern| PathPattern::parse(pattern))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(CompiledAccess {
             from,
             to,
+            except_to,
             reason: self.reason.clone(),
         })
     }
@@ -88,12 +110,15 @@ impl Access {
 struct CompiledAccess {
     from: PathPattern,
     to: Vec<PathPattern>,
+    except_to: Vec<PathPattern>,
     reason: Option<String>,
 }
 
 impl CompiledAccess {
     fn matches(&self, source: &ModulePath, target: &ModulePath) -> bool {
-        self.from.matches(source) && self.to.iter().any(|pattern| pattern.matches(target))
+        self.from.matches(source)
+            && self.to.iter().any(|pattern| pattern.matches(target))
+            && !self.except_to.iter().any(|pattern| pattern.matches(target))
     }
 }
 

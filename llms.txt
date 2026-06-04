@@ -70,6 +70,10 @@ fn architecture_rules_are_respected() {
 - Use `Rule::new().deny(...)` for absolute source-to-target bans.
 - In `between` and `within` rules, `Access::from` and `Access::to` are relative
   to the matched scope.
+- Use `Access::except_to([...])` to exclude narrower target patterns from an
+  explicit deny or from an allow entry under `deny_all`.
+- Use `Archaven::include_external_dependencies()` when rules should also match
+  direct dependencies on external crates such as `sea_orm` or `axum`.
 - Use `Rule::ignore_module_roots()` on dependency rules when `mod.rs`, `lib.rs`,
   and files named after child directories should be skipped by that specific
   rule. Ignored files are not evaluated by that rule.
@@ -122,8 +126,16 @@ The scanner parses Rust files with `syn` and records dependencies from:
 - `self::...`
 - `super::...`
 - local root paths such as `app::...`
+- non-local root paths such as `sea_orm::...` or `axum::...` when
+  `Archaven::include_external_dependencies()` is enabled
+- simple aliases from top-level `use ... as ...` items, such as
+  `use sea_orm as orm;` followed by `orm::ConnectionTrait`
+
+In external-dependency mode, Archaven ignores Rust standard roots (`std`,
+`core`, `alloc`, and `proc_macro`) and does not treat unknown single-segment
+paths such as `Order` or `DatabaseConnection` as external dependencies.
 
 Archaven is a source-level checker, not a complete Rust compiler front-end.
-Macro-generated paths, complex re-exports, trait dispatch, and every possible
-aliasing pattern may require explicit paths in code or future scanner
-improvements.
+Macro-generated paths, complex re-exports, trait dispatch, scoped/shadowed
+aliases, and every possible name-resolution pattern may require explicit paths
+in code or future scanner improvements.

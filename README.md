@@ -64,7 +64,7 @@ Add Archaven as a dev dependency:
 
 ```toml
 [dev-dependencies]
-archaven = "1.0.0"
+archaven = "1.1.0"
 ```
 
 ## Simple Examples
@@ -234,6 +234,70 @@ violations.assert_empty();
 - `Err(...)` means scanning, parsing, or rule compilation failed.
 - `Ok(violations)` means analysis completed and the returned list contains all
   architectural violations.
+
+By default, scanning records only dependencies that resolve to local project
+modules. This keeps small rules quiet: `use std::sync::Arc;` or
+`use serde::Deserialize;` will not appear in the dependency graph unless you ask
+Archaven to include external dependencies.
+
+Use `include_external_dependencies` when architecture rules should also see
+imports from crates outside the current project:
+
+```rust
+let violations = Archaven::new()
+    .include_external_dependencies()
+    .rule(/* rule */)
+    .check("./src")
+    .unwrap();
+```
+
+With that option enabled, Archaven compares each path root with the roots found
+in the scanned source tree. If the root is not local, it is treated as external.
+
+For a project with local roots `app` and `shared`, this code:
+
+```rust
+use crate::app::orders::domain::Order;
+use shared::error::AppError;
+use sea_orm::ConnectionTrait;
+use axum::Json;
+use std::sync::Arc;
+```
+
+records dependencies like:
+
+```text
+app::orders::domain::Order
+shared::error::AppError
+sea_orm::ConnectionTrait
+axum::Json
+```
+
+`std`, `core`, `alloc`, and `proc_macro` are ignored by this external-dependency
+mode because they are Rust standard roots and usually add noise to architecture
+tests.
+
+The scanner also handles simple `use ... as ...` aliases in the same file:
+
+```rust
+use sea_orm as orm;
+use sea_orm::DatabaseConnection as Db;
+
+fn run(connection: Db) {
+    orm::Statement::from_sql_and_values;
+}
+```
+
+is recorded as:
+
+```text
+sea_orm
+sea_orm::DatabaseConnection
+sea_orm::Statement::from_sql_and_values
+```
+
+This alias handling is intentionally simple. It is meant to keep common imports
+readable in architecture tests, not to replace Rust's compiler resolver.
 
 ### `Rule::between`
 
@@ -422,6 +486,28 @@ Rule::new()
 
 Use this when a rule is not scoped by `between` or `within`.
 
+### `Access`
+
+`Access::from(...).to(...)` describes a source-to-target dependency shape used
+by `deny`, `allow`, and `deny_all` allowlists. Use `to_any` when one access
+shape has several target patterns.
+
+Use `except_to` to exclude narrower target patterns from that access match:
+
+```rust
+Rule::new()
+    .named("application database boundary")
+    .deny(
+        Access::from("app::**::application::**")
+            .to("sea_orm::**")
+            .except_to(["sea_orm::DatabaseConnection"])
+            .because("application code may use only the approved SeaORM boundary type"),
+    )
+```
+
+`except_to` applies to both explicit denies and allows. Under `deny_all`, an
+allowed access with `except_to` does not allow the excepted targets.
+
 ## Path Patterns
 
 Archaven matches module paths by `::` segments.
@@ -575,6 +661,20 @@ The scanner parses Rust files with `syn` and records dependencies from:
 - `self::...`
 - `super::...`
 - local root paths such as `app::...`
+- non-local root paths such as `sea_orm::...` or `axum::...` when
+  `Archaven::include_external_dependencies()` is enabled
+- simple aliases from top-level `use ... as ...` items, such as
+  `use sea_orm as orm;` followed by `orm::ConnectionTrait`
+
+When external dependencies are included, Archaven deliberately does not record
+single-segment paths such as `Order`, `Result`, or `DatabaseConnection` as
+external dependencies. Those names are often local types, generics, or items
+already recorded by their `use` statement. Multi-segment unknown roots such as
+`sea_orm::ConnectionTrait` are treated as external.
+
+Archaven ignores `std`, `core`, `alloc`, and `proc_macro` in external-dependency
+mode. Rules can still match local modules with those names if they are actual
+source roots in the scanned project.
 
 Use `Rule::ignore_module_roots()` when module root files intentionally wire
 internals that the rule should not evaluate. Use
@@ -582,9 +682,10 @@ internals that the rule should not evaluate. Use
 directories should contain only Rust module root files.
 
 This keeps Archaven fast and usable from regular tests. It also means Archaven
-is a source-level checker, not a full Rust compiler front-end. Macro
-generated paths, complex re-exports, trait dispatch, and every possible aliasing
-pattern may require explicit paths in code or future scanner improvements.
+is a source-level checker, not a full Rust compiler front-end. Macro-generated
+paths, complex re-exports, trait dispatch, scoped/shadowed aliases, and every
+possible Rust name-resolution pattern may require explicit paths in code or
+future scanner improvements.
 
 ## Custom Rule Sets
 

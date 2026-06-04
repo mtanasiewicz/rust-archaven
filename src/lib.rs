@@ -40,6 +40,7 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Archaven {
     rules: Vec<Box<dyn RuleSet>>,
+    include_external_dependencies: bool,
 }
 
 impl Archaven {
@@ -59,6 +60,17 @@ impl Archaven {
         self
     }
 
+    /// Records dependencies that start with non-local crate or module roots.
+    ///
+    /// By default, Archaven records only dependencies that resolve to local
+    /// module roots. Use this when architecture rules should also check direct
+    /// dependencies on external crates such as `sea_orm` or `axum`.
+    #[must_use]
+    pub fn include_external_dependencies(mut self) -> Self {
+        self.include_external_dependencies = true;
+        self
+    }
+
     /// Scans a source directory and returns all dependency violations.
     ///
     /// # Errors
@@ -66,7 +78,7 @@ impl Archaven {
     /// Returns an error when the directory cannot be walked, a Rust file cannot
     /// be read or parsed, or a configured rule contains an invalid pattern.
     pub fn check(&self, root: impl AsRef<Path>) -> Result<Violations, ArchavenError> {
-        let graph = scanner::scan(root.as_ref())?;
+        let graph = scanner::scan(root.as_ref(), self.include_external_dependencies)?;
         let mut violations = Violations::new();
 
         for rule in &self.rules {

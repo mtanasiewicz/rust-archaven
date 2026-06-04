@@ -182,6 +182,62 @@ fn global_rule_can_deny_absolute_dependency_patterns() {
 }
 
 #[test]
+fn explicit_deny_can_except_target_patterns() {
+    let graph = DependencyGraph::from_dependencies([
+        dep_in_example(
+            "modules::portfolio::trade::application::command::create_trade",
+            "sea_orm::DatabaseConnection",
+        ),
+        dep_in_example(
+            "modules::portfolio::trade::application::command::create_trade",
+            "sea_orm::ConnectionTrait",
+        ),
+    ]);
+
+    let violations = Rule::new()
+        .deny(
+            Access::from("modules::**::application::**")
+                .to("sea_orm::**")
+                .except_to(["sea_orm::DatabaseConnection"]),
+        )
+        .check(&graph)
+        .unwrap();
+
+    assert_eq!(violations.len(), 1);
+
+    let formatted = violations.to_string();
+    assert!(formatted.contains("ConnectionTrait"));
+    assert!(!formatted.contains("DatabaseConnection"));
+}
+
+#[test]
+fn allow_access_can_except_target_patterns_under_deny_all() {
+    let graph = DependencyGraph::from_dependencies([
+        dep_in_example(
+            "infrastructure::repository::sql_order_repository",
+            "application::port::order_repository",
+        ),
+        dep_in_example(
+            "infrastructure::repository::sql_order_repository",
+            "application::service::create_order",
+        ),
+    ]);
+
+    let violations = Rule::new()
+        .deny_all()
+        .allow(
+            Access::from("infrastructure::**")
+                .to("application::**")
+                .except_to(["application::service::**"]),
+        )
+        .check(&graph)
+        .unwrap();
+
+    assert_eq!(violations.len(), 1);
+    assert!(violations.to_string().contains("application::service"));
+}
+
+#[test]
 fn invalid_patterns_are_returned_as_errors() {
     let graph = DependencyGraph::new();
 

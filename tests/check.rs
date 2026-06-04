@@ -1,6 +1,47 @@
 use archaven::{Access, Archaven, ArchavenError, DependencyGraph, Rule, RuleSet, Violations};
 use std::fs;
 
+struct ExpectTargets(&'static [&'static str]);
+struct RejectTargets(&'static [&'static str]);
+
+impl RuleSet for ExpectTargets {
+    fn check(&self, graph: &DependencyGraph) -> Result<Violations, ArchavenError> {
+        let targets = graph
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.target().to_string())
+            .collect::<Vec<_>>();
+
+        for expected in self.0 {
+            assert!(
+                targets.iter().any(|target| target == expected),
+                "expected target {expected} in {targets:?}"
+            );
+        }
+
+        Ok(Violations::new())
+    }
+}
+
+impl RuleSet for RejectTargets {
+    fn check(&self, graph: &DependencyGraph) -> Result<Violations, ArchavenError> {
+        let targets = graph
+            .dependencies()
+            .iter()
+            .map(|dependency| dependency.target().to_string())
+            .collect::<Vec<_>>();
+
+        for rejected in self.0 {
+            assert!(
+                !targets.iter().any(|target| target == rejected),
+                "rejected target {rejected} found in {targets:?}"
+            );
+        }
+
+        Ok(Violations::new())
+    }
+}
+
 #[test]
 fn check_scans_rust_files_and_returns_printable_violations() {
     let temp = tempfile::tempdir().unwrap();
@@ -54,6 +95,326 @@ fn check_scans_rust_files_and_returns_printable_violations() {
     assert!(formatted.contains("bounded contexts"));
     assert!(formatted.contains("src/app/sales/orders/domain/order.rs"));
     assert!(formatted.contains("adapters calling command/query APIs"));
+}
+
+#[test]
+fn check_records_external_dependencies_when_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("modules/portfolio/trade/application/command")).unwrap();
+    fs::write(
+        src.join("modules/portfolio/trade/application/command/create_trade.rs"),
+        r"
+            use axum::Json;
+            use sea_orm::{ConnectionTrait, DatabaseConnection};
+
+            #[derive(sea_orm::FromQueryResult)]
+            struct TradeRow {
+                id: i32,
+            }
+
+            fn uses_path<C: sea_orm::ConnectionTrait>() {}
+
+            fn uses_associated_path() {
+                sea_orm::Statement::from_sql_and_values;
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&[
+            "axum::Json",
+            "sea_orm::ConnectionTrait",
+            "sea_orm::DatabaseConnection",
+            "sea_orm::FromQueryResult",
+            "sea_orm::Statement::from_sql_and_values",
+        ]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_can_apply_rules_to_external_dependencies_without_configuring_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("modules/portfolio/trade/application/command")).unwrap();
+    fs::write(
+        src.join("modules/portfolio/trade/application/command/create_trade.rs"),
+        r"
+            use sea_orm::{ConnectionTrait, DatabaseConnection};
+
+            fn create_trade<C: ConnectionTrait>(connection: DatabaseConnection, _client: C) {
+                let _ = connection;
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(
+            Rule::new().deny(
+                Access::from("modules::**::application::**")
+                    .to("sea_orm::**")
+                    .except_to(["sea_orm::DatabaseConnection"]),
+            ),
+        )
+        .check(&src)
+        .unwrap();
+
+    assert_eq!(violations.len(), 1);
+    assert!(violations.to_string().contains("sea_orm::ConnectionTrait"));
+    assert!(!violations
+        .to_string()
+        .contains("sea_orm::DatabaseConnection"));
+}
+
+#[test]
+fn check_records_grouped_and_renamed_external_use_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm::{ConnectionTrait as SeaConnection, TransactionTrait};
+
+            fn use_imports<T: SeaConnection, U: TransactionTrait>() {}
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&[
+            "sea_orm::ConnectionTrait",
+            "sea_orm::TransactionTrait",
+        ]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_ignores_external_dependencies_unless_enabled() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm::ConnectionTrait;
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .rule(RejectTargets(&["sea_orm::ConnectionTrait"]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_does_not_record_standard_library_roots_as_external_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use alloc::borrow::Cow;
+            use core::fmt::Debug;
+            use proc_macro::TokenStream;
+            use std::sync::Arc;
+            use sea_orm::ConnectionTrait;
+
+            fn use_imports<T: Debug>(
+                arc: Arc<T>,
+                cow: Cow<'static, str>,
+                stream: TokenStream,
+                connection: impl ConnectionTrait,
+            ) {
+                let _ = (arc, cow, stream, connection);
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&["sea_orm::ConnectionTrait"]))
+        .rule(RejectTargets(&[
+            "alloc::borrow::Cow",
+            "core::fmt::Debug",
+            "proc_macro::TokenStream",
+            "std::sync::Arc",
+        ]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_rewrites_simple_external_root_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm as orm;
+
+            fn use_alias<C: orm::ConnectionTrait>() {}
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&["sea_orm::ConnectionTrait"]))
+        .rule(RejectTargets(&["orm::ConnectionTrait"]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_rewrites_simple_external_item_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm::DatabaseConnection as Db;
+
+            fn use_alias(connection: Db) {
+                let _ = connection;
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&["sea_orm::DatabaseConnection"]))
+        .rule(RejectTargets(&["Db"]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_rewrites_grouped_self_and_item_aliases() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm::{self as orm, DatabaseConnection as Db, TransactionTrait};
+
+            fn use_aliases<C: orm::ConnectionTrait, T: TransactionTrait>(connection: Db) {
+                let _ = connection;
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&[
+            "sea_orm::ConnectionTrait",
+            "sea_orm::DatabaseConnection",
+            "sea_orm::TransactionTrait",
+        ]))
+        .rule(RejectTargets(&[
+            "orm::ConnectionTrait",
+            "Db",
+            "TransactionTrait",
+        ]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_rewrites_simple_local_aliases_without_marking_them_external() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::create_dir_all(src.join("app/orders/service")).unwrap();
+    fs::write(
+        src.join("app/orders/application/command.rs"),
+        r"
+            use crate::app as local_app;
+
+            fn use_alias() {
+                local_app::orders::service::run();
+            }
+        ",
+    )
+    .unwrap();
+    fs::write(src.join("app/orders/service/mod.rs"), "").unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&["app::orders::service::run"]))
+        .rule(RejectTargets(&["local_app::orders::service::run"]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
+}
+
+#[test]
+fn check_does_not_treat_single_segment_paths_as_external_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+
+    fs::create_dir_all(src.join("app/orders/application")).unwrap();
+    fs::write(
+        src.join("app/orders/application/service.rs"),
+        r"
+            use sea_orm::DatabaseConnection;
+
+            struct LocalType;
+
+            fn use_import(connection: DatabaseConnection, local: LocalType) {
+                let _ = (connection, local);
+            }
+        ",
+    )
+    .unwrap();
+
+    let violations = Archaven::new()
+        .include_external_dependencies()
+        .rule(ExpectTargets(&["sea_orm::DatabaseConnection"]))
+        .rule(RejectTargets(&["DatabaseConnection", "LocalType"]))
+        .check(&src)
+        .unwrap();
+
+    assert!(violations.is_empty());
 }
 
 #[test]
